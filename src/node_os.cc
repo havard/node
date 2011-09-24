@@ -1,7 +1,28 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 
 #include <node.h>
 #include <node_os.h>
-#include <platform.h>
+#include "platform.h"
 
 #include <v8.h>
 
@@ -9,8 +30,9 @@
 #include <string.h>
 
 #ifdef __MINGW32__
+# include <io.h>
+
 # include <platform_win32.h>
-# include <platform_win32_winsock.h>
 #endif
 
 #ifdef __POSIX__
@@ -138,6 +160,26 @@ static Handle<Value> GetLoadAvg(const Arguments& args) {
   return scope.Close(loads);
 }
 
+
+static Handle<Value> GetInterfaceAddresses(const Arguments& args) {
+  return Platform::GetInterfaceAddresses();
+}
+
+
+#ifdef __MINGW32__
+static Handle<Value> OpenOSHandle(const Arguments& args) {
+  HandleScope scope;
+
+  intptr_t handle = args[0]->IntegerValue();
+
+  int fd = _open_osfhandle(handle, 0);
+  if (fd < 0)
+    return ThrowException(ErrnoException(errno, "_open_osfhandle"));
+
+  return scope.Close(Integer::New(fd));
+}
+#endif // __MINGW32__
+
 void OS::Initialize(v8::Handle<v8::Object> target) {
   HandleScope scope;
 
@@ -149,6 +191,11 @@ void OS::Initialize(v8::Handle<v8::Object> target) {
   NODE_SET_METHOD(target, "getCPUs", GetCPUInfo);
   NODE_SET_METHOD(target, "getOSType", GetOSType);
   NODE_SET_METHOD(target, "getOSRelease", GetOSRelease);
+  NODE_SET_METHOD(target, "getInterfaceAddresses", GetInterfaceAddresses);
+
+#ifdef __MINGW32__
+  NODE_SET_METHOD(target, "openOSHandle", OpenOSHandle);
+#endif
 }
 
 

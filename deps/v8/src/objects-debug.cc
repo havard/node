@@ -1,4 +1,4 @@
-// Copyright 2010 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -88,11 +88,14 @@ void HeapObject::HeapObjectVerify() {
     case FIXED_ARRAY_TYPE:
       FixedArray::cast(this)->FixedArrayVerify();
       break;
+    case FIXED_DOUBLE_ARRAY_TYPE:
+      FixedDoubleArray::cast(this)->FixedDoubleArrayVerify();
+      break;
     case BYTE_ARRAY_TYPE:
       ByteArray::cast(this)->ByteArrayVerify();
       break;
-    case PIXEL_ARRAY_TYPE:
-      PixelArray::cast(this)->PixelArrayVerify();
+    case EXTERNAL_PIXEL_ARRAY_TYPE:
+      ExternalPixelArray::cast(this)->ExternalPixelArrayVerify();
       break;
     case EXTERNAL_BYTE_ARRAY_TYPE:
       ExternalByteArray::cast(this)->ExternalByteArrayVerify();
@@ -115,6 +118,9 @@ void HeapObject::HeapObjectVerify() {
       break;
     case EXTERNAL_FLOAT_ARRAY_TYPE:
       ExternalFloatArray::cast(this)->ExternalFloatArrayVerify();
+      break;
+    case EXTERNAL_DOUBLE_ARRAY_TYPE:
+      ExternalDoubleArray::cast(this)->ExternalDoubleArrayVerify();
       break;
     case CODE_TYPE:
       Code::cast(this)->CodeVerify();
@@ -147,16 +153,28 @@ void HeapObject::HeapObjectVerify() {
     case JS_ARRAY_TYPE:
       JSArray::cast(this)->JSArrayVerify();
       break;
+    case JS_WEAK_MAP_TYPE:
+      JSWeakMap::cast(this)->JSWeakMapVerify();
+      break;
     case JS_REGEXP_TYPE:
       JSRegExp::cast(this)->JSRegExpVerify();
       break;
     case FILLER_TYPE:
       break;
-    case PROXY_TYPE:
-      Proxy::cast(this)->ProxyVerify();
+    case JS_PROXY_TYPE:
+      JSProxy::cast(this)->JSProxyVerify();
+      break;
+    case JS_FUNCTION_PROXY_TYPE:
+      JSFunctionProxy::cast(this)->JSFunctionProxyVerify();
+      break;
+    case FOREIGN_TYPE:
+      Foreign::cast(this)->ForeignVerify();
       break;
     case SHARED_FUNCTION_INFO_TYPE:
       SharedFunctionInfo::cast(this)->SharedFunctionInfoVerify();
+      break;
+    case JS_MESSAGE_OBJECT_TYPE:
+      JSMessageObject::cast(this)->JSMessageObjectVerify();
       break;
 
 #define MAKE_STRUCT_CASE(NAME, Name, name) \
@@ -175,7 +193,7 @@ void HeapObject::HeapObjectVerify() {
 
 void HeapObject::VerifyHeapPointer(Object* p) {
   ASSERT(p->IsHeapObject());
-  ASSERT(Heap::Contains(HeapObject::cast(p)));
+  ASSERT(HEAP->Contains(HeapObject::cast(p)));
 }
 
 
@@ -189,8 +207,8 @@ void ByteArray::ByteArrayVerify() {
 }
 
 
-void PixelArray::PixelArrayVerify() {
-  ASSERT(IsPixelArray());
+void ExternalPixelArray::ExternalPixelArrayVerify() {
+  ASSERT(IsExternalPixelArray());
 }
 
 
@@ -229,6 +247,11 @@ void ExternalFloatArray::ExternalFloatArrayVerify() {
 }
 
 
+void ExternalDoubleArray::ExternalDoubleArrayVerify() {
+  ASSERT(IsExternalDoubleArray());
+}
+
+
 void JSObject::JSObjectVerify() {
   VerifyHeapPointer(properties());
   VerifyHeapPointer(elements());
@@ -237,19 +260,19 @@ void JSObject::JSObjectVerify() {
              (map()->inobject_properties() + properties()->length() -
               map()->NextFreePropertyIndex()));
   }
-  ASSERT(map()->has_fast_elements() ==
-         (elements()->map() == Heap::fixed_array_map() ||
-          elements()->map() == Heap::fixed_cow_array_map()));
+  ASSERT_EQ(map()->has_fast_elements(),
+            (elements()->map() == GetHeap()->fixed_array_map() ||
+             elements()->map() == GetHeap()->fixed_cow_array_map()));
   ASSERT(map()->has_fast_elements() == HasFastElements());
 }
 
 
 void Map::MapVerify() {
-  ASSERT(!Heap::InNewSpace(this));
+  ASSERT(!HEAP->InNewSpace(this));
   ASSERT(FIRST_TYPE <= instance_type() && instance_type() <= LAST_TYPE);
   ASSERT(instance_size() == kVariableSizeSentinel ||
          (kPointerSize <= instance_size() &&
-          instance_size() < Heap::Capacity()));
+          instance_size() < HEAP->Capacity()));
   VerifyHeapPointer(prototype());
   VerifyHeapPointer(instance_descriptors());
 }
@@ -258,8 +281,7 @@ void Map::MapVerify() {
 void Map::SharedMapVerify() {
   MapVerify();
   ASSERT(is_shared());
-  ASSERT_EQ(Heap::empty_descriptor_array(), instance_descriptors());
-  ASSERT_EQ(Heap::empty_fixed_array(), code_cache());
+  ASSERT(instance_descriptors()->IsEmpty());
   ASSERT_EQ(0, pre_allocated_property_fields());
   ASSERT_EQ(0, unused_property_fields());
   ASSERT_EQ(StaticVisitorBase::GetVisitorId(instance_type(), instance_size()),
@@ -276,6 +298,12 @@ void CodeCache::CodeCacheVerify() {
 }
 
 
+void PolymorphicCodeCache::PolymorphicCodeCacheVerify() {
+  VerifyHeapPointer(cache());
+  ASSERT(cache()->IsUndefined() || cache()->IsPolymorphicCodeCacheHashTable());
+}
+
+
 void FixedArray::FixedArrayVerify() {
   for (int i = 0; i < length(); i++) {
     Object* e = get(i);
@@ -283,6 +311,18 @@ void FixedArray::FixedArrayVerify() {
       VerifyHeapPointer(e);
     } else {
       e->Verify();
+    }
+  }
+}
+
+
+void FixedDoubleArray::FixedDoubleArrayVerify() {
+  for (int i = 0; i < length(); i++) {
+    if (!is_the_hole(i)) {
+      double value = get_scalar(i);
+      ASSERT(!isnan(value) ||
+             (BitCast<uint64_t>(value) ==
+              BitCast<uint64_t>(canonical_not_the_hole_nan_as_double())));
     }
   }
 }
@@ -296,12 +336,50 @@ void JSValue::JSValueVerify() {
 }
 
 
+void JSMessageObject::JSMessageObjectVerify() {
+  CHECK(IsJSMessageObject());
+  CHECK(type()->IsString());
+  CHECK(arguments()->IsJSArray());
+  VerifyObjectField(kStartPositionOffset);
+  VerifyObjectField(kEndPositionOffset);
+  VerifyObjectField(kArgumentsOffset);
+  VerifyObjectField(kScriptOffset);
+  VerifyObjectField(kStackTraceOffset);
+  VerifyObjectField(kStackFramesOffset);
+}
+
+
 void String::StringVerify() {
   CHECK(IsString());
   CHECK(length() >= 0 && length() <= Smi::kMaxValue);
   if (IsSymbol()) {
-    CHECK(!Heap::InNewSpace(this));
+    CHECK(!HEAP->InNewSpace(this));
   }
+  if (IsConsString()) {
+    ConsString::cast(this)->ConsStringVerify();
+  } else if (IsSlicedString()) {
+    SlicedString::cast(this)->SlicedStringVerify();
+  }
+}
+
+
+void ConsString::ConsStringVerify() {
+  CHECK(this->first()->IsString());
+  CHECK(this->second() == GetHeap()->empty_string() ||
+        this->second()->IsString());
+  CHECK(this->length() >= String::kMinNonFlatLength);
+  if (this->IsFlat()) {
+    // A flat cons can only be created by String::SlowTryFlatten.
+    // Afterwards, the first part may be externalized.
+    CHECK(this->first()->IsSeqString() || this->first()->IsExternalString());
+  }
+}
+
+
+void SlicedString::SlicedStringVerify() {
+  CHECK(!this->parent()->IsConsString());
+  CHECK(!this->parent()->IsSlicedString());
+  CHECK(this->length() >= SlicedString::kMinLength);
 }
 
 
@@ -364,7 +442,7 @@ void Oddball::OddballVerify() {
   VerifyHeapPointer(to_string());
   Object* number = to_number();
   if (number->IsHeapObject()) {
-    ASSERT(number == Heap::nan_value());
+    ASSERT(number == HEAP->nan_value());
   } else {
     ASSERT(number->IsSmi());
     int value = Smi::cast(number)->value();
@@ -400,7 +478,17 @@ void Code::CodeVerify() {
 void JSArray::JSArrayVerify() {
   JSObjectVerify();
   ASSERT(length()->IsNumber() || length()->IsUndefined());
-  ASSERT(elements()->IsUndefined() || elements()->IsFixedArray());
+  ASSERT(elements()->IsUndefined() ||
+         elements()->IsFixedArray() ||
+         elements()->IsFixedDoubleArray());
+}
+
+
+void JSWeakMap::JSWeakMapVerify() {
+  CHECK(IsJSWeakMap());
+  JSObjectVerify();
+  VerifyHeapPointer(table());
+  ASSERT(table()->IsHashTable());
 }
 
 
@@ -418,14 +506,22 @@ void JSRegExp::JSRegExpVerify() {
 
       FixedArray* arr = FixedArray::cast(data());
       Object* ascii_data = arr->get(JSRegExp::kIrregexpASCIICodeIndex);
-      // TheHole : Not compiled yet.
+      // Smi : Not compiled yet (-1) or code prepared for flushing.
       // JSObject: Compilation error.
       // Code/ByteArray: Compiled code.
-      ASSERT(ascii_data->IsTheHole() || ascii_data->IsJSObject() ||
-          (is_native ? ascii_data->IsCode() : ascii_data->IsByteArray()));
+      ASSERT(ascii_data->IsSmi() ||
+             (is_native ? ascii_data->IsCode() : ascii_data->IsByteArray()));
       Object* uc16_data = arr->get(JSRegExp::kIrregexpUC16CodeIndex);
-      ASSERT(uc16_data->IsTheHole() || ascii_data->IsJSObject() ||
-          (is_native ? uc16_data->IsCode() : uc16_data->IsByteArray()));
+      ASSERT(uc16_data->IsSmi() ||
+             (is_native ? uc16_data->IsCode() : uc16_data->IsByteArray()));
+
+      Object* ascii_saved = arr->get(JSRegExp::kIrregexpASCIICodeSavedIndex);
+      ASSERT(ascii_saved->IsSmi() || ascii_saved->IsString() ||
+             ascii_saved->IsCode());
+      Object* uc16_saved = arr->get(JSRegExp::kIrregexpUC16CodeSavedIndex);
+      ASSERT(uc16_saved->IsSmi() || uc16_saved->IsString() ||
+             uc16_saved->IsCode());
+
       ASSERT(arr->get(JSRegExp::kIrregexpCaptureCountIndex)->IsSmi());
       ASSERT(arr->get(JSRegExp::kIrregexpMaxRegisterCountIndex)->IsSmi());
       break;
@@ -438,8 +534,22 @@ void JSRegExp::JSRegExpVerify() {
 }
 
 
-void Proxy::ProxyVerify() {
-  ASSERT(IsProxy());
+void JSProxy::JSProxyVerify() {
+  ASSERT(IsJSProxy());
+  VerifyPointer(handler());
+}
+
+
+void JSFunctionProxy::JSFunctionProxyVerify() {
+  ASSERT(IsJSFunctionProxy());
+  JSProxyVerify();
+  VerifyPointer(call_trap());
+  VerifyPointer(construct_trap());
+}
+
+
+void Foreign::ForeignVerify() {
+  ASSERT(IsForeign());
 }
 
 
@@ -575,16 +685,17 @@ void JSObject::IncrementSpillStatistics(SpillInformation* info) {
       int holes = 0;
       FixedArray* e = FixedArray::cast(elements());
       int len = e->length();
+      Heap* heap = HEAP;
       for (int i = 0; i < len; i++) {
-        if (e->get(i) == Heap::the_hole_value()) holes++;
+        if (e->get(i) == heap->the_hole_value()) holes++;
       }
       info->number_of_fast_used_elements_   += len - holes;
       info->number_of_fast_unused_elements_ += holes;
       break;
     }
-    case PIXEL_ELEMENTS: {
+    case EXTERNAL_PIXEL_ELEMENTS: {
       info->number_of_objects_with_fast_elements_++;
-      PixelArray* e = PixelArray::cast(elements());
+      ExternalPixelArray* e = ExternalPixelArray::cast(elements());
       info->number_of_fast_used_elements_ += e->length();
       break;
     }
@@ -670,16 +781,17 @@ void JSFunctionResultCache::JSFunctionResultCacheVerify() {
 
   int finger = Smi::cast(get(kFingerIndex))->value();
   ASSERT(kEntriesIndex <= finger);
-  ASSERT(finger < size || finger == kEntriesIndex);
+  ASSERT((finger < size) || (finger == kEntriesIndex && finger == size));
   ASSERT_EQ(0, finger % kEntrySize);
 
   if (FLAG_enable_slow_asserts) {
-    STATIC_ASSERT(2 == kEntrySize);
-    for (int i = kEntriesIndex; i < length(); i += kEntrySize) {
+    for (int i = kEntriesIndex; i < size; i++) {
+      ASSERT(!get(i)->IsTheHole());
       get(i)->Verify();
-      get(i + 1)->Verify();
-      // Key and value must be either both the holes, or not.
-      ASSERT(get(i)->IsTheHole() == get(i + 1)->IsTheHole());
+    }
+    for (int i = size; i < length(); i++) {
+      ASSERT(get(i)->IsTheHole());
+      get(i)->Verify();
     }
   }
 }

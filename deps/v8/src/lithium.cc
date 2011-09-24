@@ -25,10 +25,83 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "v8.h"
 #include "lithium.h"
 
 namespace v8 {
 namespace internal {
+
+
+void LOperand::PrintTo(StringStream* stream) {
+  LUnallocated* unalloc = NULL;
+  switch (kind()) {
+    case INVALID:
+      break;
+    case UNALLOCATED:
+      unalloc = LUnallocated::cast(this);
+      stream->Add("v%d", unalloc->virtual_register());
+      switch (unalloc->policy()) {
+        case LUnallocated::NONE:
+          break;
+        case LUnallocated::FIXED_REGISTER: {
+          const char* register_name =
+              Register::AllocationIndexToString(unalloc->fixed_index());
+          stream->Add("(=%s)", register_name);
+          break;
+        }
+        case LUnallocated::FIXED_DOUBLE_REGISTER: {
+          const char* double_register_name =
+              DoubleRegister::AllocationIndexToString(unalloc->fixed_index());
+          stream->Add("(=%s)", double_register_name);
+          break;
+        }
+        case LUnallocated::FIXED_SLOT:
+          stream->Add("(=%dS)", unalloc->fixed_index());
+          break;
+        case LUnallocated::MUST_HAVE_REGISTER:
+          stream->Add("(R)");
+          break;
+        case LUnallocated::WRITABLE_REGISTER:
+          stream->Add("(WR)");
+          break;
+        case LUnallocated::SAME_AS_FIRST_INPUT:
+          stream->Add("(1)");
+          break;
+        case LUnallocated::ANY:
+          stream->Add("(-)");
+          break;
+        case LUnallocated::IGNORE:
+          stream->Add("(0)");
+          break;
+      }
+      break;
+    case CONSTANT_OPERAND:
+      stream->Add("[constant:%d]", index());
+      break;
+    case STACK_SLOT:
+      stream->Add("[stack:%d]", index());
+      break;
+    case DOUBLE_STACK_SLOT:
+      stream->Add("[double_stack:%d]", index());
+      break;
+    case REGISTER:
+      stream->Add("[%s|R]", Register::AllocationIndexToString(index()));
+      break;
+    case DOUBLE_REGISTER:
+      stream->Add("[%s|R]", DoubleRegister::AllocationIndexToString(index()));
+      break;
+    case ARGUMENT:
+      stream->Add("[arg:%d]", index());
+      break;
+  }
+}
+
+
+int LOperand::VirtualRegister() {
+  LUnallocated* unalloc = LUnallocated::cast(this);
+  return unalloc->virtual_register();
+}
+
 
 bool LParallelMove::IsRedundant() const {
   for (int i = 0; i < move_operands_.length(); ++i) {
@@ -39,18 +112,21 @@ bool LParallelMove::IsRedundant() const {
 
 
 void LParallelMove::PrintDataTo(StringStream* stream) const {
-  for (int i = move_operands_.length() - 1; i >= 0; --i) {
+  bool first = true;
+  for (int i = 0; i < move_operands_.length(); ++i) {
     if (!move_operands_[i].IsEliminated()) {
-      LOperand* from = move_operands_[i].from();
-      LOperand* to = move_operands_[i].to();
-      if (from->Equals(to)) {
-        to->PrintTo(stream);
+      LOperand* source = move_operands_[i].source();
+      LOperand* destination = move_operands_[i].destination();
+      if (!first) stream->Add(" ");
+      first = false;
+      if (source->Equals(destination)) {
+        destination->PrintTo(stream);
       } else {
-        to->PrintTo(stream);
+        destination->PrintTo(stream);
         stream->Add(" = ");
-        from->PrintTo(stream);
+        source->PrintTo(stream);
       }
-      stream->Add("; ");
+      stream->Add(";");
     }
   }
 }
@@ -87,6 +163,32 @@ void LPointerMap::PrintTo(StringStream* stream) {
     pointer_operands_[i]->PrintTo(stream);
   }
   stream->Add("} @%d", position());
+}
+
+
+int ElementsKindToShiftSize(ElementsKind elements_kind) {
+  switch (elements_kind) {
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_PIXEL_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+      return 0;
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+      return 1;
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS:
+      return 2;
+    case EXTERNAL_DOUBLE_ELEMENTS:
+    case FAST_DOUBLE_ELEMENTS:
+      return 3;
+    case FAST_ELEMENTS:
+    case DICTIONARY_ELEMENTS:
+    case NON_STRICT_ARGUMENTS_ELEMENTS:
+      return kPointerSizeLog2;
+  }
+  UNREACHABLE();
+  return 0;
 }
 
 

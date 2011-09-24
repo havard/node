@@ -81,12 +81,7 @@ function TimeFromYear(year) {
 
 
 function InLeapYear(time) {
-  return DaysInYear(YearFromTime(time)) == 366 ? 1 : 0;
-}
-
-
-function DayWithinYear(time) {
-  return DAY(time) - DayFromYear(YearFromTime(time));
+  return DaysInYear(YearFromTime(time)) - 365;  // Returns 1 or 0.
 }
 
 
@@ -605,7 +600,7 @@ function DateToTimeString() {
 
 // ECMA 262 - 15.9.5.5
 function DateToLocaleString() {
-  return DateToString.call(this);
+  return %_CallFunction(this, DateToString);
 }
 
 
@@ -689,7 +684,7 @@ function DateGetUTCDate() {
 
 // ECMA 262 - 15.9.5.16
 function DateGetDay() {
-  var t = %_ValueOf(this);
+  var t = DATE_VALUE(this);
   if (NUMBER_IS_NAN(t)) return t;
   return WeekDay(LocalTimeNoCheck(t));
 }
@@ -697,7 +692,7 @@ function DateGetDay() {
 
 // ECMA 262 - 15.9.5.17
 function DateGetUTCDay() {
-  var t = %_ValueOf(this);
+  var t = DATE_VALUE(this);
   if (NUMBER_IS_NAN(t)) return t;
   return WeekDay(t);
 }
@@ -973,7 +968,7 @@ function DateSetYear(year) {
 // do that either.  Instead, we create a new function whose name
 // property will return toGMTString.
 function DateToGMTString() {
-  return DateToUTCString.call(this);
+  return %_CallFunction(this, DateToUTCString);
 }
 
 
@@ -986,11 +981,22 @@ function PadInt(n, digits) {
 function DateToISOString() {
   var t = DATE_VALUE(this);
   if (NUMBER_IS_NAN(t)) return kInvalidDate;
-  return this.getUTCFullYear() + 
+  var year = this.getUTCFullYear();
+  var year_string;
+  if (year >= 0 && year <= 9999) {
+    year_string = PadInt(year, 4);
+  } else {
+    if (year < 0) {
+      year_string = "-" + PadInt(-year, 6);
+    } else {
+      year_string = "+" + PadInt(year, 6);
+    }
+  }
+  return year_string +
       '-' + PadInt(this.getUTCMonth() + 1, 2) +
-      '-' + PadInt(this.getUTCDate(), 2) + 
+      '-' + PadInt(this.getUTCDate(), 2) +
       'T' + PadInt(this.getUTCHours(), 2) +
-      ':' + PadInt(this.getUTCMinutes(), 2) + 
+      ':' + PadInt(this.getUTCMinutes(), 2) +
       ':' + PadInt(this.getUTCSeconds(), 2) +
       '.' + PadInt(this.getUTCMilliseconds(), 3) +
       'Z';
@@ -1000,8 +1006,8 @@ function DateToISOString() {
 function DateToJSON(key) {
   var o = ToObject(this);
   var tv = DefaultNumber(o);
-  if (IS_NUMBER(tv) && !NUMBER_IS_FINITE(tv)) { 
-    return null; 
+  if (IS_NUMBER(tv) && !NUMBER_IS_FINITE(tv)) {
+    return null;
   }
   return o.toISOString();
 }
@@ -1042,18 +1048,19 @@ function ResetDateCache() {
 
 // -------------------------------------------------------------------
 
-function SetupDate() {
-  // Setup non-enumerable properties of the Date object itself.
+function SetUpDate() {
+  %CheckIsBootstrapping();
+  // Set up non-enumerable properties of the Date object itself.
   InstallFunctions($Date, DONT_ENUM, $Array(
     "UTC", DateUTC,
     "parse", DateParse,
     "now", DateNow
   ));
 
-  // Setup non-enumerable constructor property of the Date prototype object.
+  // Set up non-enumerable constructor property of the Date prototype object.
   %SetProperty($Date.prototype, "constructor", $Date, DONT_ENUM);
 
-  // Setup non-enumerable functions of the Date prototype object and
+  // Set up non-enumerable functions of the Date prototype object and
   // set their names.
   InstallFunctionsOnHiddenPrototype($Date.prototype, DONT_ENUM, $Array(
     "toString", DateToString,
@@ -1105,4 +1112,4 @@ function SetupDate() {
   ));
 }
 
-SetupDate();
+SetUpDate();

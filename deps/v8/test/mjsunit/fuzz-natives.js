@@ -1,4 +1,4 @@
-// Copyright 2008 the V8 project authors. All rights reserved.
+// Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -118,8 +118,9 @@ var knownProblems = {
   "Abort": true,
 
   // Avoid calling the concat operation, because weird lengths
-  // may lead to out-of-memory.
+  // may lead to out-of-memory.  Ditto for StringBuilderJoin.
   "StringBuilderConcat": true,
+  "StringBuilderJoin": true,
 
   // These functions use pseudo-stack-pointers and are not robust
   // to unexpected integer values.
@@ -140,9 +141,12 @@ var knownProblems = {
   "EnableAccessChecks": true,
 
   // These functions should not be callable as runtime functions.
-  "NewContext": true,
+  "NewFunctionContext": true,
   "NewArgumentsFast": true,
-  "PushContext": true,
+  "NewStrictArgumentsFast": true,
+  "PushWithContext": true,
+  "PushCatchContext": true,
+  "PushBlockContext": true,
   "LazyCompile": true,
   "LazyRecompile": true,
   "NotifyDeoptimized": true,
@@ -159,12 +163,16 @@ var knownProblems = {
   "PromoteScheduledException": true,
   "DeleteHandleScopeExtensions": true,
 
+  // Requires integer arguments to be non-negative.
+  "Apply": true,
+
   // That can only be invoked on Array.prototype.
   "FinishArrayPrototypeSetup": true,
 
   "_SwapElements": true,
 
-  // Performance critical function which cannot afford type checks.
+  // Performance critical functions which cannot afford type checks.
+  "_IsNativeOrStrictMode": true,
   "_CallFunction": true,
 
   // Tries to allocate based on argument, and (correctly) throws

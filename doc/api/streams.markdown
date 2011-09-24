@@ -33,7 +33,7 @@ Emitted if there was an error receiving data.
 
 `function () { }`
 
-Emitted when the underlying file descriptor has be closed. Not all streams
+Emitted when the underlying file descriptor has been closed. Not all streams
 will emit this.  (For example, an incoming HTTP request will not emit
 `'close'`.)
 
@@ -47,7 +47,7 @@ support this functionality; all others will simply never emit this event.
 ### stream.readable
 
 A boolean that is `true` by default, but turns `false` after an `'error'`
-occured, the stream came to an `'end'`, or `destroy()` was called.
+occurred, the stream came to an `'end'`, or `destroy()` was called.
 
 ### stream.setEncoding(encoding)
 Makes the data event emit a string instead of a `Buffer`. `encoding` can be
@@ -77,6 +77,8 @@ This is a `Stream.prototype` method available on all `Stream`s.
 Connects this read stream to `destination` WriteStream. Incoming
 data on this stream gets written to `destination`. The destination and source
 streams are kept in sync by pausing and resuming as necessary.
+
+This function returns the `destination` stream.
 
 Emulating the Unix `cat` command:
 
@@ -110,7 +112,7 @@ A `Writable Stream` has the following methods, members, and events.
 
 `function () { }`
 
-Emitted after a `write()` method was called that returned `false` to
+After a `write()` method returned `false`, this event is emitted to
 indicate that it is safe to write again.
 
 ### Event: 'error'
@@ -124,6 +126,12 @@ Emitted on error with the exception `exception`.
 `function () { }`
 
 Emitted when the underlying file descriptor has been closed.
+
+### Event: 'pipe'
+
+`function (src) { }`
+
+Emitted when the stream is passed to a readable stream's pipe method.
 
 ### stream.writable
 
@@ -151,6 +159,7 @@ Same as the above except with a raw buffer.
 ### stream.end()
 
 Terminates the stream with EOF or FIN.
+This call will allow queued write data to be sent before closing the stream.
 
 ### stream.end(string, encoding)
 
@@ -164,3 +173,10 @@ Same as above but with a `buffer`.
 ### stream.destroy()
 
 Closes the underlying file descriptor. Stream will not emit any more events.
+Any queued write data will not be sent.
+
+### stream.destroySoon()
+
+After the write queue is drained, close the file descriptor. `destroySoon()`
+can still destroy straight away, as long as there is no data left in the queue
+for writes.
