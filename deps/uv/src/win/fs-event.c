@@ -41,7 +41,8 @@ static void uv_fs_event_init_handle(uv_loop_t* loop, uv_fs_event_t* handle,
   handle->buffer = NULL;
   handle->req_pending = 0;
   handle->filew = NULL;
-  
+  handle->short_filew = NULL;
+
   uv_req_init(loop, (uv_req_t*)&handle->req);
   handle->req.type = UV_FS_EVENT_REQ;
   handle->req.data = (void*)handle;
@@ -95,25 +96,29 @@ static int uv_split_path(const wchar_t* filename, wchar_t** dir,
   while (i > 0 && filename[--i] != '\\' && filename[i] != '/');
 
   if (i == 0) {
-    *dir = (wchar_t*)malloc((MAX_PATH + 1) * sizeof(wchar_t));
-    if (!*dir) {
-      uv_fatal_error(ERROR_OUTOFMEMORY, "malloc");
-    }
+    if (dir) {
+      *dir = (wchar_t*)malloc((MAX_PATH + 1) * sizeof(wchar_t));
+      if (!*dir) {
+        uv_fatal_error(ERROR_OUTOFMEMORY, "malloc");
+      }
 
-    if (!GetCurrentDirectoryW(MAX_PATH, *dir)) {
-      free(*dir);
-      *dir = NULL;
-      return -1;
+      if (!GetCurrentDirectoryW(MAX_PATH, *dir)) {
+        free(*dir);
+        *dir = NULL;
+        return -1;
+      }
     }
     
     *file = wcsdup(filename);
   } else {
-    *dir = (wchar_t*)malloc((i + 1) * sizeof(wchar_t));
-    if (!*dir) {
-      uv_fatal_error(ERROR_OUTOFMEMORY, "malloc");
+    if (dir) {
+      *dir = (wchar_t*)malloc((i + 1) * sizeof(wchar_t));
+      if (!*dir) {
+        uv_fatal_error(ERROR_OUTOFMEMORY, "malloc");
+      }
+      wcsncpy(*dir, filename, i);
+      (*dir)[i] = L'\0';
     }
-    wcsncpy(*dir, filename, i);
-    (*dir)[i] = L'\0';
 
     *file = (wchar_t*)malloc((len - i) * sizeof(wchar_t));
     if (!*file) {
@@ -128,10 +133,14 @@ static int uv_split_path(const wchar_t* filename, wchar_t** dir,
 
 
 int uv_fs_event_init(uv_loop_t* loop, uv_fs_event_t* handle,
-    const char* filename, uv_fs_event_cb cb) {
+    const char* filename, uv_fs_event_cb cb, int flags) {
   int name_size;
   DWORD attr, last_error;
   wchar_t* dir = NULL, *dir_to_watch, *filenamew;
+  wchar_t short_path[MAX_PATH];
+
+  /* We don't support any flags yet. */
+  assert(!flags);
 
   uv_fs_event_init_handle(loop, handle, filename, cb);
 
@@ -144,7 +153,7 @@ int uv_fs_event_init(uv_loop_t* loop, uv_fs_event_t* handle,
 
   if (!uv_utf8_to_utf16(filename, filenamew, 
       name_size / sizeof(wchar_t))) {
-    uv_set_sys_error(loop, GetLastError());
+    uv__set_sys_error(loop, GetLastError());
     return -1;
   }
 
@@ -165,7 +174,19 @@ int uv_fs_event_init(uv_loop_t* loop, uv_fs_event_t* handle,
      * filename is a file.  So we split filename into dir & file parts, and
      * watch the dir directory.
      */
+    
+    /* Convert to short path. */
+    if (!GetShortPathNameW(filenamew, short_path, COUNTOF(short_path))) {
+      last_error = GetLastError();
+      goto error;
+    }
+
     if (uv_split_path(filenamew, &dir, &handle->filew) != 0) {
+      last_error = GetLastError();
+      goto error;
+    }
+
+    if (uv_split_path(short_path, NULL, &handle->short_filew) != 0) {
       last_error = GetLastError();
       goto error;
     }
@@ -194,9 +215,9 @@ int uv_fs_event_init(uv_loop_t* loop, uv_fs_event_t* handle,
   }
 
   if (CreateIoCompletionPort(handle->dir_handle,
-                              loop->iocp,
-                              (ULONG_PTR)handle,
-                              0) == NULL) {
+                             loop->iocp,
+                             (ULONG_PTR)handle,
+                             0) == NULL) {
     last_error = GetLastError();
     goto error;
   }
@@ -242,6 +263,11 @@ error:
     handle->filew = NULL;
   }
 
+  if (handle->short_filew) {
+    free(handle->short_filew);
+    handle->short_filew = NULL;
+  }
+
   if (handle->dir_handle != INVALID_HANDLE_VALUE) {
     CloseHandle(handle->dir_handle);
     handle->dir_handle = INVALID_HANDLE_VALUE;
@@ -252,7 +278,7 @@ error:
     handle->buffer = NULL;
   }
 
-  uv_set_sys_error(loop, last_error);
+  uv__set_sys_error(loop, last_error);
   return -1;
 }
 
@@ -279,8 +305,11 @@ void uv_process_fs_event_req(uv_loop_t* loop, uv_req_t* req,
          * Fire the event only if we were asked to watch a directory,
          * or if the filename filter matches.
          */
-        if (handle->is_path_dir || _wcsnicmp(handle->filew, file_info->FileName,
-          file_info->FileNameLength / sizeof(wchar_t)) == 0) {
+        if (handle->is_path_dir ||
+          _wcsnicmp(handle->filew, file_info->FileName,
+            file_info->FileNameLength / sizeof(wchar_t)) == 0 ||
+          _wcsnicmp(handle->short_filew, file_info->FileName,
+            file_info->FileNameLength / sizeof(wchar_t)) == 0) {
         
           /* Convert the filename to utf8. */
           utf8size = uv_utf16_to_utf8(file_info->FileName,
@@ -300,7 +329,7 @@ void uv_process_fs_event_req(uv_loop_t* loop, uv_req_t* req,
                                         filename,
                                         utf8size);
             if (utf8size) {
-              filename[utf8size] = L'\0';
+              filename[utf8size] = '\0';
             } else {
               free(filename);
               filename = NULL;
@@ -327,10 +356,12 @@ void uv_process_fs_event_req(uv_loop_t* loop, uv_req_t* req,
         offset = file_info->NextEntryOffset;
       } while(offset);
     } else {
-      handle->cb(handle, NULL, UV_CHANGE, 0);
+      if (!(handle->flags & UV_HANDLE_CLOSING)) {
+        handle->cb(handle, NULL, UV_CHANGE, 0);
+      }
     }
   } else {
-    loop->last_error = GET_REQ_UV_ERROR(req);
+    uv__set_sys_error(loop, GET_REQ_ERROR(req));
     handle->cb(handle, NULL, 0, -1);
   }
 
@@ -368,6 +399,11 @@ void uv_fs_event_endgame(uv_loop_t* loop, uv_fs_event_t* handle) {
     if (handle->filew) {
       free(handle->filew);
       handle->filew = NULL;
+    }
+
+    if (handle->short_filew) {
+      free(handle->short_filew);
+      handle->short_filew = NULL;
     }
 
     if (handle->filename) {

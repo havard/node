@@ -184,9 +184,6 @@
           }],
         ],
       }],
-      ['OS=="solaris"', {
-        'defines': [ '__C99FEATURES__=1' ], # isinf() etc.
-      }],
     ],
     'configurations': {
       'Debug': {

@@ -25,9 +25,9 @@ var assert = require('assert');
 var spawn = require('child_process').spawn;
 var debug = require('_debugger');
 
-var code = require('fs').readFileSync(common.fixturesDir + '/breakpoints.js');
+var script = common.fixturesDir + '/breakpoints.js';
 
-var child = spawn(process.execPath, ['debug', '-e', code]);
+var child = spawn(process.execPath, ['debug', script]);
 
 var buffer = '';
 child.stdout.setEncoding('utf-8');
@@ -46,7 +46,7 @@ child.on('line', function(line) {
   assert.ok(expected.length > 0, 'Got unexpected line: ' + line);
 
   var expectedLine = expected[0].lines.shift();
-  assert.equal(line, expectedLine);
+  assert.ok(line.match(expectedLine) !== null, line + ' != ' + expectedLine);
 
   if (expected[0].lines.length === 0) {
     var callback = expected[0].callback;
@@ -58,71 +58,108 @@ child.on('line', function(line) {
 function addTest(input, output) {
   function next() {
     if (expected.length > 0) {
-      child.stdin.write(expected[0].input + '\n');
-      console.log('---');
-      console.log('>>', expected[0].input);
+      var res = child.stdin.write(expected[0].input + '\n'),
+          callback;
+
+      if (!expected[0].lines) {
+        callback = expected[0].callback;
+        expected.shift();
+      }
+
+      if (callback) {
+        if (res !== true) {
+          child.stdin.on('drain', callback);
+        } else {
+          process.nextTick(callback);
+        }
+      }
     } else {
       finish();
     }
   };
   expected.push({input: input, lines: output, callback: next});
-};
+}
 
 // Initial lines
 addTest(null, [
-  "debug> \b< debugger listening on port 5858",
-  "debug> \bconnecting... ok",
-  "debug> \bbreak in [unnamed]:3",
-  "\b  1 ",
-  "\b  2 debugger;",
-  "\b  3 debugger;",
-  "\b  4 function a(x) {",
-  "\b  5   var i = 10;"
+  /listening on port 5858/,
+  /connecting... ok/,
+  /break in .*:1/,
+  /1/, /2/, /3/
 ]);
 
 // Next
 addTest('n', [
-  "debug> debug> debug> \bbreak in [unnamed]:13",
-  "\b 11   return ['hello', 'world'].join(' ');",
-  "\b 12 };",
-  "\b 13 a();",
-  "\b 14 a(1);",
-  "\b 15 b();"
+  /break in .*:11/,
+  /9/, /10/, /11/, /12/, /13/
+]);
+
+// Watch
+addTest('watch("\'x\'"), true', [/true/]);
+
+// Continue
+addTest('c', [
+  /break in .*:5/,
+  /Watchers/,
+  /0:\s+'x' = "x"/,
+  /()/,
+  /3/, /4/, /5/, /6/, /7/
+]);
+
+// Show watchers
+addTest('watchers', [
+  /0:\s+'x' = "x"/
+]);
+
+// Unwatch
+addTest('unwatch("\'x\'"), true', [ /true/ ]);
+
+// Step out
+addTest('o', [
+  /break in .*:12/,
+  /10/, /11/, /12/, /13/, /14/
 ]);
 
 // Continue
 addTest('c', [
- "debug> debug> debug> \bbreak in [unnamed]:7",
-  "\b  5   var i = 10;",
-  "\b  6   while (--i != 0);",
-  "\b  7   debugger;",
-  "\b  8   return i;",
-  "\b  9 };"
+  /break in .*:5/,
+  /3/, /4/, /5/, /6/, /7/
 ]);
 
-// Step out
-addTest('o', [
-  "debug> debug> debug> \bbreak in [unnamed]:14",
-  "\b 12 };",
-  "\b 13 a();",
-  "\b 14 a(1);",
-  "\b 15 b();",
-  "\b 16 b();"
+// Set breakpoint by function name
+addTest('sb("setInterval()", "!(setInterval.flag++)")', [
+  /1/, /2/, /3/, /4/, /5/, /6/, /7/, /8/, /9/, /10/
+]);
+
+// Continue
+addTest('c', [
+  /break in node.js:\d+/,
+  /\d/, /\d/, /\d/, /\d/, /\d/
+]);
+
+// Continue
+addTest('c, bt', [
+  /Can't request backtrace now/
 ]);
 
 
 function finish() {
   process.exit(0);
-};
+}
 
 function quit() {
   if (quit.called) return;
   quit.called = true;
   child.stdin.write('quit');
-};
+}
 
 setTimeout(function() {
-  throw new Error('timeout!');
+  var err = 'Timeout';
+  if (expected.length > 0 && expected[0].lines) {
+    err = err + '. Expected: ' + expected[0].lines.shift();
+  }
+
+  throw new Error(err);
 }, 5000);
 
 process.once('uncaughtException', function(e) {

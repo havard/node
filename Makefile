@@ -1,36 +1,20 @@
-WAF=python tools/waf-light
+BUILDTYPE ?= Release
 
-web_root = node@nodejs.org:~/web/nodejs.org/
+all: out/Makefile
+	tools/gyp_node -f make
+	$(MAKE) -C out BUILDTYPE=$(BUILDTYPE)
+	-ln -fs out/Release/node node
+	-ln -fs out/Debug/node node_g
 
-#
-# Because we recursively call make from waf we need to make sure that we are
-# using the correct make. Not all makes are GNU Make, but this likely only
-# works with gnu make. To deal with this we remember how the user invoked us
-# via a make builtin variable and use that in all subsequent operations
-#
-export NODE_MAKE := $(MAKE)
+out/Release/node: all
 
-all: program
-	@-[ -f out/Release/node ] && ls -lh out/Release/node
-	@-[ -f out/Debug/node ] && ls -lh out/Debug/node
+out/Makefile: node.gyp deps/uv/uv.gyp
 
-all-progress:
-	@$(WAF) -p build
+clean:
+	rm -rf out
 
-program:
-	@$(WAF) --product-type=program build
-
-staticlib:
-	@$(WAF) --product-type=cstaticlib build
-
-dynamiclib:
-	@$(WAF) --product-type=cshlib build
-
-install:
-	@$(WAF) install
-
-uninstall:
-	@$(WAF) uninstall
+distclean:
+	rm -rf out
 
 test: all
 	python tools/test.py --mode=release simple message
@@ -73,8 +57,6 @@ UVTEST += simple/test-buffer
 UVTEST += simple/test-c-ares
 UVTEST += simple/test-chdir
 UVTEST += simple/test-delayed-require
-UVTEST += simple/test-dgram-pingpong
-UVTEST += simple/test-dgram-udp4
 UVTEST += simple/test-eio-race2
 UVTEST += simple/test-eio-race4
 UVTEST += simple/test-event-emitter-add-listeners
@@ -118,10 +100,8 @@ UVTEST += simple/test-http-client-race-2
 UVTEST += simple/test-http-client-upload
 UVTEST += simple/test-http-client-upload-buf
 UVTEST += simple/test-http-contentLength0
-UVTEST += simple/test-http-curl-chunk-problem
 UVTEST += simple/test-http-default-encoding
 UVTEST += simple/test-http-dns-fail
-UVTEST += simple/test-http-dns-error
 UVTEST += simple/test-http-eof-on-connect
 UVTEST += simple/test-http-exceptions
 UVTEST += simple/test-http-expect-continue
@@ -179,8 +159,6 @@ UVTEST += simple/test-next-tick-starvation
 UVTEST += simple/test-module-load-list
 UVTEST += simple/test-path
 UVTEST += simple/test-pipe-stream
-UVTEST += simple/test-pipe-file-to-http
-UVTEST += simple/test-process-env
 UVTEST += simple/test-pump-file2tcp
 UVTEST += simple/test-pump-file2tcp-noexist
 UVTEST += simple/test-punycode
@@ -190,12 +168,9 @@ UVTEST += simple/test-readdouble
 UVTEST += simple/test-readfloat
 UVTEST += simple/test-readint
 UVTEST += simple/test-readuint
-UVTEST += simple/test-regress-GH-746
 UVTEST += simple/test-regress-GH-819
 UVTEST += simple/test-regress-GH-897
-UVTEST += simple/test-regress-GH-1531
 UVTEST += simple/test-regression-object-prototype
-UVTEST += simple/test-repl
 UVTEST += simple/test-require-cache
 UVTEST += simple/test-require-cache-without-stat
 UVTEST += simple/test-require-exceptions
@@ -217,7 +192,6 @@ UVTEST += simple/test-tcp-wrap-connect
 UVTEST += simple/test-tcp-wrap-listen
 UVTEST += simple/test-timers-linked-list
 UVTEST += simple/test-tty-stdout-end
-UVTEST += simple/test-umask
 UVTEST += simple/test-url
 UVTEST += simple/test-utf8-scripts
 UVTEST += simple/test-vm-create-context-circular-reference
@@ -261,13 +235,11 @@ UVTEST += simple/test-child-process-deprecated-api
 
 
 test-uv: all
-	NODE_USE_UV=1 python tools/test.py --libuv simple
+	NODE_USE_UV=1 python tools/test.py $(UVTEST)
 
 test-uv-debug: all
-	NODE_USE_UV=1 python tools/test.py --mode=debug simple
+	NODE_USE_UV=1 python tools/test.py --mode=debug $(UVTEST)
 
-
-out/Release/node: all
 
 apidoc_sources = $(wildcard doc/api/*.markdown)
 apidocs = $(addprefix out/,$(apidoc_sources:.markdown=.html))
@@ -312,17 +284,6 @@ docopen: out/doc/api/all.html
 
 docclean:
 	-rm -rf out/doc
-
-clean:
-	$(WAF) clean
-	-find tools -name "*.pyc" | xargs rm -f
-
-distclean: docclean
-	-find tools -name "*.pyc" | xargs rm -f
-	-rm -rf out/ node node_g
-
-check:
-	@tools/waf-light check
 
 VERSION=$(shell git describe)
 TARNAME=node-$(VERSION)

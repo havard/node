@@ -21,7 +21,10 @@
 
 #include <assert.h>
 #include <node.h>
+#include <req_wrap.h>
 #include <uv.h>
+
+#include <string.h>
 
 #if defined(__OpenBSD__) || defined(__MINGW32__) || defined(_MSC_VER)
 # include <nameser.h>
@@ -62,6 +65,9 @@ using v8::Object;
 using v8::Persistent;
 using v8::String;
 using v8::Value;
+
+
+typedef class ReqWrap<uv_getaddrinfo_t> GetAddrInfoReqWrap;
 
 static Persistent<String> oncomplete_sym;
 
@@ -149,7 +155,7 @@ class QueryWrap {
     object_ = Persistent<Object>::New(Object::New());
   }
 
-  ~QueryWrap() {
+  virtual ~QueryWrap() {
     assert(!object_.IsEmpty());
 
     object_->Delete(oncomplete_sym);
@@ -401,6 +407,38 @@ class QueryNsWrap: public QueryWrap {
 };
 
 
+class QueryTxtWrap: public QueryWrap {
+ public:
+  int Send(const char* name) {
+    ares_query(ares_channel, name, ns_c_in, ns_t_txt, Callback, GetQueryArg());
+    return 0;
+  }
+
+ protected:
+  void Parse(unsigned char* buf, int len) {
+    struct ares_txt_reply* txt_out;
+
+    int status = ares_parse_txt_reply(buf, len, &txt_out);
+    if (status != ARES_SUCCESS) {
+      this->ParseError(status);
+      return;
+    }
+
+    Local<Array> txt_records = Array::New();
+
+    struct ares_txt_reply *current = txt_out;
+    for (int i = 0; current; ++i, current = current->next) {
+      Local<String> txt = String::New(reinterpret_cast<char*>(current->txt));
+      txt_records->Set(Integer::New(i), txt);
+    }
+
+    ares_free_data(txt_out);
+
+    this->CallOnComplete(txt_records);
+  }
+};
+
+
 class QuerySrvWrap: public QueryWrap {
  public:
   int Send(const char* name) {
@@ -560,6 +598,136 @@ static Handle<Value> QueryWithFamily(const Arguments& args) {
 }
 
 
+void AfterGetAddrInfo(uv_getaddrinfo_t* req, int status, struct addrinfo* res) {
+  HandleScope scope;
+
+  GetAddrInfoReqWrap* req_wrap = (GetAddrInfoReqWrap*) req->data;
+
+  Local<Value> argv[1];
+
+  if (status) {
+    // Error
+    SetErrno(uv_last_error(uv_default_loop()));
+    argv[0] = Local<Value>::New(Null());
+  } else {
+    // Success
+    struct addrinfo *address;
+    int n = 0;
+
+    // Count the number of responses.
+    for (address = res; address; address = address->ai_next) {
+      n++;
+    }
+
+    // Create the response array.
+    Local<Array> results = Array::New(n);
+
+    char ip[INET6_ADDRSTRLEN];
+    const char *addr;
+
+    n = 0;
+
+    // Iterate over the IPv4 responses again this time creating javascript
+    // strings for each IP and filling the results array.
+    address = res;
+    while (address) {
+      assert(address->ai_socktype == SOCK_STREAM);
+
+      // Ignore random ai_family types.
+      if (address->ai_family == AF_INET) {
+        // Juggle pointers
+        addr = (char*) &((struct sockaddr_in*) address->ai_addr)->sin_addr;
+        const char* c = uv_inet_ntop(address->ai_family, addr, ip,
+            INET6_ADDRSTRLEN);
+
+        // Create JavaScript string
+        Local<String> s = String::New(c);
+        results->Set(n, s);
+        n++;
+      }
+
+      // Increment
+      address = address->ai_next;
+    }
+
+    // Iterate over the IPv6 responses putting them in the array.
+    address = res;
+    while (address) {
+      assert(address->ai_socktype == SOCK_STREAM);
+
+      // Ignore random ai_family types.
+      if (address->ai_family == AF_INET6) {
+        // Juggle pointers
+        addr = (char*) &((struct sockaddr_in6*) address->ai_addr)->sin6_addr;
+        const char* c = uv_inet_ntop(address->ai_family, addr, ip,
+            INET6_ADDRSTRLEN);
+
+        // Create JavaScript string
+        Local<String> s = String::New(c);
+        results->Set(n, s);
+        n++;
+      }
+
+      // Increment
+      address = address->ai_next;
+    }
+
+
+    argv[0] = results;
+  }
+
+  uv_freeaddrinfo(res);
+
+  // Make the callback into JavaScript
+  MakeCallback(req_wrap->object_, "oncomplete", 1, argv);
+
+  delete req_wrap;
+}
+
+
+static Handle<Value> GetAddrInfo(const Arguments& args) {
+  HandleScope scope;
+
+  String::Utf8Value hostname(args[0]->ToString());
+
+  int fam = AF_UNSPEC;
+  if (args[1]->IsInt32()) {
+    switch (args[1]->Int32Value()) {
+      case 6:
+        fam = AF_INET6;
+        break;
+
+      case 4:
+        fam = AF_INET;
+        break;
+    }
+  }
+
+  GetAddrInfoReqWrap* req_wrap = new GetAddrInfoReqWrap();
+
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(struct addrinfo));
+  hints.ai_family = fam;
+  hints.ai_socktype = SOCK_STREAM;
+
+  int r = uv_getaddrinfo(uv_default_loop(),
+                         &req_wrap->req_,
+                         AfterGetAddrInfo,
+                         *hostname,
+                         NULL,
+                         &hints);
+  req_wrap->Dispatched();
+
+  if (r) {
+    SetErrno(uv_last_error(uv_default_loop()));
+    delete req_wrap;
+    return scope.Close(v8::Null());
+  } else {
+    return scope.Close(req_wrap->object_);
+  }
+}
+
+
 static void Initialize(Handle<Object> target) {
   HandleScope scope;
   int r;
@@ -576,9 +744,12 @@ static void Initialize(Handle<Object> target) {
   NODE_SET_METHOD(target, "queryCname", Query<QueryCnameWrap>);
   NODE_SET_METHOD(target, "queryMx", Query<QueryMxWrap>);
   NODE_SET_METHOD(target, "queryNs", Query<QueryNsWrap>);
+  NODE_SET_METHOD(target, "queryTxt", Query<QueryTxtWrap>);
   NODE_SET_METHOD(target, "querySrv", Query<QuerySrvWrap>);
   NODE_SET_METHOD(target, "getHostByAddr", Query<GetHostByAddrWrap>);
   NODE_SET_METHOD(target, "getHostByName", QueryWithFamily<GetHostByNameWrap>);
+
+  NODE_SET_METHOD(target, "getaddrinfo", GetAddrInfo);
 
   target->Set(String::NewSymbol("AF_INET"), Integer::New(AF_INET));
   target->Set(String::NewSymbol("AF_INET6"), Integer::New(AF_INET6));
@@ -592,4 +763,4 @@ static void Initialize(Handle<Object> target) {
 
 }  // namespace node
 
-NODE_MODULE(node_cares_wrap, node::cares_wrap::Initialize);
+NODE_MODULE(node_cares_wrap, node::cares_wrap::Initialize)

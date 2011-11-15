@@ -36,6 +36,13 @@
 
 #include <errno.h>
 
+/* Sigh. */
+#ifdef _WIN32
+# include <windows.h>
+#else
+# include <pthread.h>
+#endif
+
 #if OPENSSL_VERSION_NUMBER >= 0x10000000L
 # define OPENSSL_CONST const
 #else
@@ -76,6 +83,69 @@ static Persistent<String> ext_key_usage_symbol;
 
 static Persistent<FunctionTemplate> secure_context_constructor;
 
+#ifdef _WIN32
+
+static HANDLE* locks;
+
+
+static void crypto_lock_init(void) {
+  int i, n;
+
+  n = CRYPTO_num_locks();
+  locks = new HANDLE[n];
+
+  for (i = 0; i < n; i++)
+    if (!(locks[i] = CreateMutex(NULL, FALSE, NULL)))
+      abort();
+}
+
+
+static void crypto_lock_cb(int mode, int n, const char* file, int line) {
+  if (mode & CRYPTO_LOCK)
+    WaitForSingleObject(locks[n], INFINITE);
+  else
+    ReleaseMutex(locks[n]);
+}
+
+
+static unsigned long crypto_id_cb(void) {
+  return (unsigned long) GetCurrentThreadId();
+}
+
+#else /* !_WIN32 */
+
+static pthread_rwlock_t* locks;
+
+
+static void crypto_lock_init(void) {
+  int i, n;
+
+  n = CRYPTO_num_locks();
+  locks = new pthread_rwlock_t[n];
+
+  for (i = 0; i < n; i++)
+    if (pthread_rwlock_init(locks + i, NULL))
+      abort();
+}
+
+
+static void crypto_lock_cb(int mode, int n, const char* file, int line) {
+  if (mode & CRYPTO_LOCK) {
+    if (mode & CRYPTO_READ) pthread_rwlock_rdlock(locks + n);
+    if (mode & CRYPTO_WRITE) pthread_rwlock_wrlock(locks + n);
+  } else {
+    pthread_rwlock_unlock(locks + n);
+  }
+}
+
+
+static unsigned long crypto_id_cb(void) {
+  return (unsigned long) pthread_self();
+}
+
+#endif /* !_WIN32 */
+
+
 void SecureContext::Initialize(Handle<Object> target) {
   HandleScope scope;
 
@@ -93,6 +163,8 @@ void SecureContext::Initialize(Handle<Object> target) {
   NODE_SET_PROTOTYPE_METHOD(t, "addRootCerts", SecureContext::AddRootCerts);
   NODE_SET_PROTOTYPE_METHOD(t, "setCiphers", SecureContext::SetCiphers);
   NODE_SET_PROTOTYPE_METHOD(t, "setOptions", SecureContext::SetOptions);
+  NODE_SET_PROTOTYPE_METHOD(t, "setSessionIdContext",
+                               SecureContext::SetSessionIdContext);
   NODE_SET_PROTOTYPE_METHOD(t, "close", SecureContext::Close);
 
   target->Set(String::NewSymbol("SecureContext"), t->GetFunction());
@@ -221,14 +293,21 @@ Handle<Value> SecureContext::SetKey(const Arguments& args) {
 
   SecureContext *sc = ObjectWrap::Unwrap<SecureContext>(args.Holder());
 
-  if (args.Length() != 1) {
+  unsigned int len = args.Length();
+  if (len != 1 && len != 2) {
+    return ThrowException(Exception::TypeError(String::New("Bad parameter")));
+  }
+  if (len == 2 && !args[1]->IsString()) {
     return ThrowException(Exception::TypeError(String::New("Bad parameter")));
   }
 
   BIO *bio = LoadBIO(args[0]);
   if (!bio) return False();
 
-  EVP_PKEY* key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+  String::Utf8Value passphrase(args[1]->ToString());
+
+  EVP_PKEY* key = PEM_read_bio_PrivateKey(bio, NULL, NULL,
+                                          len == 1 ? NULL : *passphrase);
 
   if (!key) {
     BIO_free(bio);
@@ -470,6 +549,38 @@ Handle<Value> SecureContext::SetOptions(const Arguments& args) {
   unsigned int opts = args[0]->Uint32Value();
 
   SSL_CTX_set_options(sc->ctx_, opts);
+
+  return True();
+}
+
+Handle<Value> SecureContext::SetSessionIdContext(const Arguments& args) {
+  HandleScope scope;
+
+  SecureContext *sc = ObjectWrap::Unwrap<SecureContext>(args.Holder());
+
+  if (args.Length() != 1 || !args[0]->IsString()) {
+    return ThrowException(Exception::TypeError(String::New("Bad parameter")));
+  }
+
+  String::Utf8Value sessionIdContext(args[0]->ToString());
+  const unsigned char* sid_ctx = (const unsigned char*) *sessionIdContext;
+  unsigned int sid_ctx_len = sessionIdContext.length();
+
+  int r = SSL_CTX_set_session_id_context(sc->ctx_, sid_ctx, sid_ctx_len);
+  if (r != 1) {
+    Local<String> message;
+    BIO* bio;
+    BUF_MEM* mem;
+    if ((bio = BIO_new(BIO_s_mem()))) {
+      ERR_print_errors(bio);
+      BIO_get_mem_ptr(bio, &mem);
+      message = String::New(mem->data, mem->length);
+      BIO_free(bio);
+    } else {
+      message = String::New("SSL_CTX_set_session_id_context error");
+    }
+    return ThrowException(Exception::TypeError(message));
+  }
 
   return True();
 }
@@ -739,7 +850,7 @@ int Connection::SelectNextProtoCallback_(SSL *s,
   }
 
   return SSL_TLSEXT_ERR_OK;
-}                                  
+}
 #endif
 
 #ifdef SSL_CTRL_SET_TLSEXT_SERVERNAME_CB
@@ -4013,6 +4124,139 @@ PBKDF2(const Arguments& args) {
   return Undefined();
 }
 
+
+typedef int (*RandomBytesGenerator)(unsigned char* buf, int size);
+
+struct RandomBytesRequest {
+  ~RandomBytesRequest();
+  Persistent<Function> callback_;
+  unsigned long error_; // openssl error code or zero
+  uv_work_t work_req_;
+  size_t size_;
+  char* data_;
+};
+
+
+RandomBytesRequest::~RandomBytesRequest() {
+  if (!callback_.IsEmpty()) {
+    callback_.Dispose();
+    callback_.Clear();
+  }
+}
+
+
+void RandomBytesFree(char* data, void* hint) {
+  delete[] data;
+}
+
+
+template <RandomBytesGenerator generator>
+void RandomBytesWork(uv_work_t* work_req) {
+  RandomBytesRequest* req =
+      container_of(work_req, RandomBytesRequest, work_req_);
+
+  int r = generator(reinterpret_cast<unsigned char*>(req->data_), req->size_);
+
+  switch (r) {
+  case 0:
+    // RAND_bytes() returns 0 on error, RAND_pseudo_bytes() returns 0
+    // when the result is not cryptographically strong - the latter
+    // sucks but is not an error
+    if (generator == RAND_bytes)
+      req->error_ = ERR_get_error();
+    break;
+
+  case -1:
+    // not supported - can this actually happen?
+    req->error_ = (unsigned long) -1;
+    break;
+  }
+}
+
+
+void RandomBytesCheck(RandomBytesRequest* req, Handle<Value> argv[2]) {
+  HandleScope scope;
+
+  if (req->error_) {
+    char errmsg[256] = "Operation not supported";
+
+    if (req->error_ != (unsigned long) -1)
+      ERR_error_string_n(req->error_, errmsg, sizeof errmsg);
+
+    argv[0] = Exception::Error(String::New(errmsg));
+    argv[1] = Null();
+  }
+  else {
+    // avoids the malloc + memcpy
+    Buffer* buffer = Buffer::New(req->data_, req->size_, RandomBytesFree, NULL);
+    argv[0] = Null();
+    argv[1] = buffer->handle_;
+  }
+}
+
+
+template <RandomBytesGenerator generator>
+void RandomBytesAfter(uv_work_t* work_req) {
+  RandomBytesRequest* req =
+      container_of(work_req, RandomBytesRequest, work_req_);
+
+  HandleScope scope;
+  Handle<Value> argv[2];
+  RandomBytesCheck(req, argv);
+
+  TryCatch tc;
+  req->callback_->Call(Context::GetCurrent()->Global(), 2, argv);
+
+  if (tc.HasCaught())
+    FatalException(tc);
+
+  delete req;
+}
+
+
+template <RandomBytesGenerator generator>
+Handle<Value> RandomBytes(const Arguments& args) {
+  HandleScope scope;
+
+  // maybe allow a buffer to write to? cuts down on object creation
+  // when generating random data in a loop
+  if (!args[0]->IsUint32()) {
+    Local<String> s = String::New("Argument #1 must be number > 0");
+    return ThrowException(Exception::TypeError(s));
+  }
+
+  const size_t size = args[0]->Uint32Value();
+
+  RandomBytesRequest* req = new RandomBytesRequest();
+  req->error_ = 0;
+  req->data_ = new char[size];
+  req->size_ = size;
+
+  if (args[1]->IsFunction()) {
+    Local<Function> callback_v = Local<Function>(Function::Cast(*args[1]));
+    req->callback_ = Persistent<Function>::New(callback_v);
+
+    uv_queue_work(uv_default_loop(),
+                  &req->work_req_,
+                  RandomBytesWork<generator>,
+                  RandomBytesAfter<generator>);
+
+    return Undefined();
+  }
+  else {
+    Handle<Value> argv[2];
+    RandomBytesWork<generator>(&req->work_req_);
+    RandomBytesCheck(req, argv);
+    delete req;
+
+    if (!argv[0]->IsNull())
+      return ThrowException(argv[0]);
+    else
+      return argv[1];
+  }
+}
+
+
 void InitCrypto(Handle<Object> target) {
   HandleScope scope;
 
@@ -4021,6 +4265,10 @@ void InitCrypto(Handle<Object> target) {
   OpenSSL_add_all_digests();
   SSL_load_error_strings();
   ERR_load_crypto_strings();
+
+  crypto_lock_init();
+  CRYPTO_set_locking_callback(crypto_lock_cb);
+  CRYPTO_set_id_callback(crypto_id_cb);
 
   // Turn off compression. Saves memory - do it in userland.
 #if !defined(OPENSSL_NO_COMP)
@@ -4046,6 +4294,8 @@ void InitCrypto(Handle<Object> target) {
   Verify::Initialize(target);
 
   NODE_SET_METHOD(target, "PBKDF2", PBKDF2);
+  NODE_SET_METHOD(target, "randomBytes", RandomBytes<RAND_bytes>);
+  NODE_SET_METHOD(target, "pseudoRandomBytes", RandomBytes<RAND_pseudo_bytes>);
 
   subject_symbol    = NODE_PSYMBOL("subject");
   issuer_symbol     = NODE_PSYMBOL("issuer");
@@ -4063,5 +4313,5 @@ void InitCrypto(Handle<Object> target) {
 }  // namespace crypto
 }  // namespace node
 
-NODE_MODULE(node_crypto, node::crypto::InitCrypto);
+NODE_MODULE(node_crypto, node::crypto::InitCrypto)
 

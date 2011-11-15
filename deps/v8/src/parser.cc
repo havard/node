@@ -1753,6 +1753,8 @@ Block* Parser::ParseVariableDeclarations(VariableDeclarationContext var_context,
           value->AsCall() == NULL &&
           value->AsCallNew() == NULL) {
         fni_->Infer();
+      } else {
+        fni_->RemoveLastFunction();
       }
     }
 
@@ -2503,6 +2505,8 @@ Expression* Parser::ParseAssignmentExpression(bool accept_IN, bool* ok) {
          || op == Token::ASSIGN)
         && (right->AsCall() == NULL && right->AsCallNew() == NULL)) {
       fni_->Infer();
+    } else {
+      fni_->RemoveLastFunction();
     }
     fni_->Leave();
   }
@@ -5194,13 +5198,16 @@ bool ParserApi::Parse(CompilationInfo* info) {
   bool harmony_block_scoping = !info->is_native() &&
                                FLAG_harmony_block_scoping;
   if (info->is_lazy()) {
-    Parser parser(script, true, NULL, NULL);
+    bool allow_natives_syntax =
+        FLAG_allow_natives_syntax ||
+        info->is_native();
+    Parser parser(script, allow_natives_syntax, NULL, NULL);
     parser.SetHarmonyBlockScoping(harmony_block_scoping);
     result = parser.ParseLazy(info);
   } else {
     // Whether we allow %identifier(..) syntax.
     bool allow_natives_syntax =
-        info->allows_natives_syntax() || FLAG_allow_natives_syntax;
+        info->is_native() || FLAG_allow_natives_syntax;
     ScriptDataImpl* pre_data = info->pre_parse_data();
     Parser parser(script,
                   allow_natives_syntax,
